@@ -384,6 +384,7 @@ impl Crypter {
         mode: Mode,
         key: &[u8],
         iv: Option<&[u8]>,
+        tag_len: Option<usize>,
     ) -> Result<Crypter, ErrorStack> {
         ffi::init();
 
@@ -431,6 +432,17 @@ impl Crypter {
                 (Some(_), None) | (None, None) => ptr::null_mut(),
                 (None, Some(_)) => panic!("an IV is required for this cipher"),
             };
+            if t.is_ccm() {
+                if let Some(tag_len) = tag_len {
+                    assert!(tag_len <= c_int::max_value() as usize);
+                    cvt(ffi::EVP_CIPHER_CTX_ctrl(
+                        crypter.ctx,
+                        ffi::EVP_CTRL_GCM_SET_TAG,
+                        tag_len as c_int,
+                        ptr::null_mut(),
+                    ))?;
+                }
+            }
             cvt(ffi::EVP_CipherInit_ex(
                 crypter.ctx,
                 ptr::null(),
@@ -709,7 +721,7 @@ fn cipher(
     iv: Option<&[u8]>,
     data: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
-    let mut c = Crypter::new(t, mode, key, iv)?;
+    let mut c = Crypter::new(t, mode, key, iv, None)?;
     let mut out = vec![0; data.len() + t.block_size()];
     let count = c.update(data, &mut out)?;
     let rest = c.finalize(&mut out[count..])?;
@@ -733,7 +745,7 @@ pub fn encrypt_aead(
     data: &[u8],
     tag: &mut [u8],
 ) -> Result<Vec<u8>, ErrorStack> {
-    let mut c = Crypter::new(t, Mode::Encrypt, key, iv)?;
+    let mut c = Crypter::new(t, Mode::Encrypt, key, iv, Some(tag.len()))?;
     let mut out = vec![0; data.len() + t.block_size()];
 
     if t.is_ccm() {
@@ -761,7 +773,7 @@ pub fn decrypt_aead(
     data: &[u8],
     tag: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
-    let mut c = Crypter::new(t, Mode::Decrypt, key, iv)?;
+    let mut c = Crypter::new(t, Mode::Decrypt, key, iv, None)?;
     let mut out = vec![0; data.len() + t.block_size()];
 
     if t.is_ccm() {
@@ -817,6 +829,7 @@ mod tests {
             super::Mode::Encrypt,
             &key,
             Some(&iv),
+            None,
         )
         .unwrap();
 
@@ -847,6 +860,7 @@ mod tests {
             super::Mode::Encrypt,
             &k0,
             None,
+            None,
         )
         .unwrap();
         c.pad(false);
@@ -860,6 +874,7 @@ mod tests {
             super::Cipher::aes_256_ecb(),
             super::Mode::Decrypt,
             &k0,
+            None,
             None,
         )
         .unwrap();
@@ -891,6 +906,7 @@ mod tests {
             super::Mode::Decrypt,
             &data,
             Some(&iv),
+            None,
         )
         .unwrap();
         cr.pad(false);
@@ -934,7 +950,7 @@ mod tests {
         let iv = Vec::from_hex(iv).unwrap();
 
         let computed = {
-            let mut c = Crypter::new(ciphertype, Mode::Decrypt, &key, Some(&iv)).unwrap();
+            let mut c = Crypter::new(ciphertype, Mode::Decrypt, &key, Some(&iv), None).unwrap();
             c.pad(false);
             let mut out = vec![0; ct.len() + ciphertype.block_size()];
             let count = c.update(&ct, &mut out).unwrap();
@@ -1283,9 +1299,9 @@ mod tests {
 
         let pt = "d71864877f2578db092daba2d6a1f9f4698a9c356c7830a1";
         let ct = "b4dd74e7a0cc51aea45dfb401a41d5822c96901a83247ea0";
-        let tag = "d6965f5aa6e31302a9cc2b36";
+        let tag = "790245709081a4fa";
 
-        let mut actual_tag = [0; 12];
+        let mut actual_tag = [0; 8];
         let out = encrypt_aead(
             Cipher::aes_128_ccm(),
             &Vec::from_hex(key).unwrap(),
